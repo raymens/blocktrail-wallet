@@ -1,6 +1,6 @@
 angular.module('blocktrail.wallet').factory(
     'storageService',
-    function(CONFIG, $log, $window, $ionicApp) {
+    function(CONFIG, $log, $window, $ionicApp, $q) {
         var dbs = {};
 
         var db = function(name) {
@@ -30,6 +30,21 @@ angular.module('blocktrail.wallet').factory(
             ;
         };
 
+        var resetSingle = function(name) {
+            var adapter = db(name).adapter;
+            return db(name).destroy().then(function() {
+                if (adapter === 'idb') {
+                    indexedDB.deleteDatabase('_pouch_' + name);
+                }
+                dbs[name] = null;
+
+                $log.debug('cleared database: ' + name);
+
+                //recreate the database, empty
+                return $q.when(db(name));
+            });
+        };
+
         // init defaults
         db('launch');
         db('contacts');
@@ -40,7 +55,8 @@ angular.module('blocktrail.wallet').factory(
 
         return {
             db: db,
-            resetAll: resetAll
+            reset: resetSingle,
+            resetAll: resetAll,
         };
     }
 );
