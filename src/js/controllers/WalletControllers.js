@@ -1,6 +1,6 @@
 angular.module('blocktrail.wallet')
-    .controller('WalletCtrl', function($q, $log, $scope, $rootScope, $interval, storageService, $ionicUser, sdkService,
-                                       Wallet, Contacts, CONFIG, settingsService, $timeout, $ionicAnalytics) {
+    .controller('WalletCtrl', function($q, $log, $scope, $rootScope, $interval, storageService, $ionicUser, sdkService, $translate,
+                                       Wallet, Contacts, CONFIG, settingsService, $timeout, $ionicAnalytics, $cordovaVibration, $cordovaToast) {
 
         // wait 200ms timeout to allow view to render before hiding loadingscreen
         $timeout(function() {
@@ -47,9 +47,11 @@ angular.module('blocktrail.wallet')
         };
 
         $rootScope.syncProfile = function() {            
-            //sync profile if a pending update is present
+            //sync profile if a pending update is present, else check for upstream changes
             if (!settingsService.profileSynced) {
                 settingsService.$syncProfileUp();
+            } else {
+                settingsService.$syncProfileDown();
             }
         };
 
@@ -57,7 +59,11 @@ angular.module('blocktrail.wallet')
             //sync any changes to contacts, if syncing enabled
             if (settingsService.enableContacts) {
                 Contacts.sync()
-                    .then(function(list) {
+                    .then(function() {
+                        //rebuild the cached contacts list
+                        return Contacts.list(true);
+                    })
+                    .then(function() {
                         settingsService.contactsLastSync = new Date().valueOf();
                         settingsService.permissionContacts = true;
                         return settingsService.$store();
@@ -76,6 +82,23 @@ angular.module('blocktrail.wallet')
                     });
             }
         };
+
+        $scope.$on('new_transactions', function(event, transactions) {
+            //show popup and vibrate on new receiving tx
+            $log.debug('New Transactions have been found!!!', transactions);
+            transactions.forEach(function(transaction) {
+                if (transaction.wallet_value_change > 0) {
+                    $cordovaToast.showLongTop($translate.instant('MSG_NEW_TX').sentenceCase()).then(function(success) {
+                        if (settingsService.vibrateOnTx) {
+                            $cordovaVibration.vibrate(600);
+                        }
+                        // success
+                    }, function(err) {
+                        console.error(err);
+                    });
+                }
+            });
+        });
 
         // do initial updates then poll for changes, all with small offsets to reducing blocking / slowing down of rendering
         $timeout(function() { $rootScope.getPrice(); }, 1000);
@@ -141,32 +164,40 @@ angular.module('blocktrail.wallet')
             //refresh transactions, block height and wallet balance
             $q.all([
                 $q.when($rootScope.getBalance()),
+                $q.when($rootScope.getPrice()),
                 $q.when($rootScope.getBlockHeight()),
                 $q.when(Wallet.pollTransactions())
             ]).then(function(result) {
                 $scope.paginationOptions.from = 0;
+                $scope.canLoadMoreTransactions = true;
                 return $scope.getTransactions($scope.paginationOptions.from, $scope.paginationOptions.limit, true)
                     .then(function() {
                         $scope.$broadcast('scroll.refreshComplete');
                     }, function(err) {
                         $scope.$broadcast('scroll.refreshComplete');
                     });
+            }).catch(function (err) {
+                //should probably alert user...
+                $scope.$broadcast('scroll.refreshComplete');
             });
         };
 
-        $scope.getTransactions = function(from, to, reset) {
+        $scope.getTransactions = function(from, limit, reset) {
             //get cached transactions
-            return Wallet.transactions(from, to).then(function(result) {
-                $scope.transactionsData = result;
+            console.log('getTransactions', from, limit);
+            return Wallet.transactions(from, limit).then(function(result) {
+                console.log('getTransactions.result', result);
 
                 if (reset) {
                     $scope.lastDateHeader = 0;
+                    $scope.transactionsData = [];
                     $scope.transactionList = [];
                 }
-                var processedTxs = $scope.groupTransactions($scope.transactionsData);
-                $scope.transactionList = $scope.transactionList.concat(processedTxs);
+
+                $scope.transactionsData = $scope.transactionsData.concat(result);
+                $scope.transactionList = $scope.groupTransactions($scope.transactionsData);
                 $scope.paginationOptions.from += result.length;
-                $scope.canLoadMoreTransactions = result.length > 0;
+                $scope.canLoadMoreTransactions = result.length >= limit;
 
                 $log.debug("transactionList", $scope.transactionList);
             });
@@ -250,10 +281,10 @@ angular.module('blocktrail.wallet')
         $scope.$on('new_transactions', function(event, transactions) {
             $log.debug('new_transactions', transactions);
 
-
             transactions.forEach(function(transaction) {
                 $scope.transactionsData.unshift(transaction);
             });
+
             $scope.$apply(function() {
                 //update balance now
                 $rootScope.getBalance();
@@ -289,15 +320,10 @@ angular.module('blocktrail.wallet')
 
         $scope.$on('ORPHAN', function() {
             if ($scope.isActive) {
-                $scope.$apply(function() {
+                $timeout(function() {
                     $log.debug('WalletCtrl.ORPHAN');
 
-                    //update balance now
-                    $rootScope.getBalance();
-
-                    $scope.transactions = [];
-                    $scope.paginationOptions.from = 0;
-                    $scope.getTransactions($scope.paginationOptions.from, $scope.paginationOptions.limit);
+                    $scope.refreshTransactions();
                 });
             }
         });
